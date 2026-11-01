@@ -1,3 +1,4 @@
+const io_mod = @import("../shared/io.zig");
 const std = @import("std");
 const command_lex = @import("command_lex.zig");
 const safe_git = @import("safe_git.zig");
@@ -2172,7 +2173,7 @@ fn runParityShell(
         var file = try tmp.dir.createFile(io, "record", .{ .truncate = true });
         defer file.close(io);
         try file.writeStreamingAll(io, parity_recorder);
-        try file.setPermissions(io, std.Io.File.Permissions.fromMode(0o700));
+        try file.setPermissions(io, io_mod.permissionsFromMode(0o700));
     }
 
     var script: std.ArrayList(u8) = .empty;

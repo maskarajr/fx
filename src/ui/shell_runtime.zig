@@ -36,7 +36,7 @@ extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) ?[*:0]u8;
 
 pub const supports_resize_signal = resize_runtime.supports_resize_signal;
-pub const ResizeHandler = if (builtin.target.os.tag == .wasi)
+pub const ResizeHandler = if (builtin.target.os.tag == .wasi or builtin.target.os.tag == .windows)
     *const fn () callconv(.c) void
 else
     std.posix.Sigaction.handler_fn;
@@ -63,7 +63,7 @@ pub const AlternateScreenOwner = enum {
 };
 
 pub const TerminalState = struct {
-    stdin_fd: std.posix.fd_t = std.posix.STDIN_FILENO,
+    stdin_fd: std.posix.fd_t = if (builtin.target.os.tag == .windows) @ptrFromInt(1) else std.posix.STDIN_FILENO,
     original_termios: std.posix.termios = undefined,
     raw_enabled: bool = false,
     alternate_screen_owner: AlternateScreenOwner = .none,
@@ -71,6 +71,7 @@ pub const TerminalState = struct {
     alternate_mouse_tracking_active: bool = false,
     signal_handler_installed: bool = false,
     old_winch_action: ?std.posix.Sigaction = null,
+    stdin_raw: io_mod.StdinRaw = .{},
 
     pub fn fileApprovalScreenActive(self: TerminalState) bool {
         return self.alternate_screen_owner == .file_approval;
@@ -86,7 +87,9 @@ pub const TerminalState = struct {
 
     pub fn ensureInteractive(self: TerminalState) !void {
         if (comptime builtin.target.os.tag == .wasi) return;
-        if (std.c.isatty(self.stdin_fd) == 0 or std.c.isatty(std.posix.STDOUT_FILENO) == 0) {
+        if (comptime builtin.target.os.tag == .windows) {
+            if (!io_mod.stdinIsTerminal() or !io_mod.stdoutIsTerminal()) return error.NotATerminal;
+        } else if (std.c.isatty(self.stdin_fd) == 0 or std.c.isatty(std.posix.STDOUT_FILENO) == 0) {
             return error.NotATerminal;
         }
         // The session draws with cursor movement, which TERM=dumb lacks.
@@ -94,12 +97,17 @@ pub const TerminalState = struct {
     }
 
     pub fn captureOriginalTermios(self: *TerminalState) !void {
-        if (comptime builtin.target.os.tag == .wasi) return;
+        if (comptime builtin.target.os.tag == .wasi or builtin.target.os.tag == .windows) return;
         self.original_termios = try io_mod.tcgetattr(self.stdin_fd);
     }
 
     pub fn enableRawMode(self: *TerminalState) !void {
         if (comptime builtin.target.os.tag == .wasi) {
+            self.raw_enabled = true;
+            return;
+        }
+        if (comptime builtin.target.os.tag == .windows) {
+            self.stdin_raw = try io_mod.StdinRaw.enable();
             self.raw_enabled = true;
             return;
         }
@@ -134,7 +142,9 @@ pub const TerminalState = struct {
 
     pub fn disableRawMode(self: *TerminalState) void {
         if (!self.raw_enabled) return;
-        if (comptime builtin.target.os.tag != .wasi) {
+        if (comptime builtin.target.os.tag == .windows) {
+            self.stdin_raw.disable();
+        } else if (comptime builtin.target.os.tag != .wasi) {
             io_mod.tcsetattr(self.stdin_fd, .FLUSH, self.original_termios) catch {};
         }
         self.raw_enabled = false;
@@ -246,6 +256,7 @@ pub const TerminalState = struct {
         if (comptime builtin.target.os.tag == .wasi) {
             return std.Io.File.stdin().readStreaming(io_mod.getIo(), &.{out});
         }
+        if (comptime builtin.target.os.tag == .windows) return io_mod.readStdin(out);
         return std.posix.read(self.stdin_fd, out);
     }
 
@@ -255,6 +266,14 @@ pub const TerminalState = struct {
                 1 => .{ .readable = true },
                 -1 => .{ .hung_up = true },
                 else => .{},
+            };
+        }
+        if (comptime builtin.target.os.tag == .windows) {
+            const polled = try io_mod.pollStdin(timeout_ms);
+            return .{
+                .readable = polled.readable,
+                .hung_up = polled.hung_up,
+                .has_error = polled.has_error,
             };
         }
         var fds = [_]std.posix.pollfd{.{

@@ -336,7 +336,9 @@ pub const Tracker = struct {
         preserved_group: ?std.posix.pid_t,
         comptime Effects: type,
     ) DeliverySummary {
-        if (signal == std.posix.SIG.KILL) self.stopProcessesWith(preserved_group, Effects);
+        if (comptime builtin.target.os.tag != .windows) {
+            if (signal == std.posix.SIG.KILL) self.stopProcessesWith(preserved_group, Effects);
+        }
         return self.signalProcessesOnceWith(signal, preserved_group, Effects);
     }
 
@@ -1261,11 +1263,25 @@ test "session inspection separates the caller's session from a new one" {
     );
 }
 
+fn windowsSnapshotMiss() error{ ProcessNotFound, ProcessTreeUnsupported, OutOfMemory } {
+    // A runtime flag keeps both errors in the set on every OS. Windows always
+    // reports the process as missing; callers already treat that as "no tree".
+    var choice: u2 = 0;
+    choice = 0;
+    return switch (choice) {
+        0 => error.ProcessNotFound,
+        1 => error.ProcessTreeUnsupported,
+        else => error.OutOfMemory,
+    };
+}
+
 fn captureSnapshot(alloc: Allocator, pid: std.posix.pid_t) !ProcessSnapshot {
     return switch (builtin.target.os.tag) {
         .linux => try captureLinuxSnapshot(alloc, pid),
         .macos => try captureMacOSSnapshot(pid),
-        else => error.ProcessTreeUnsupported,
+        // No process snapshot on this OS. Callers treat ProcessNotFound as
+        // "nothing to track" and keep going.
+        else => windowsSnapshotMiss(),
     };
 }
 

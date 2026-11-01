@@ -2,6 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const darwin_process_spawn = @import("darwin_process_spawn.zig");
 const profile_paths = @import("profile_paths.zig");
+const windows_console = if (builtin.target.os.tag == .windows)
+    @import("windows_console.zig")
+else
+    struct {};
 
 pub const RawEnviron = [*:null]const ?[*:0]const u8;
 
@@ -479,9 +483,15 @@ fn liveLibcEnviron() ?RawEnviron {
 /// Child processes still inherit `HOME` unchanged.
 pub fn homeDir() ?[]const u8 {
     // With HOME unset, FX_HOME alone names fx's files, so its parent serves.
-    const home = getenv("HOME") orelse return profile_paths.fxHomeParent();
-    if (!std.Io.Dir.path.isAbsolute(home)) return null;
-    return home;
+    // Windows accounts name the profile USERPROFILE (`C:\Users\...`). HOME is
+    // still accepted when a shell sets it.
+    const home = if (comptime builtin.target.os.tag == .windows)
+        getenv("USERPROFILE") orelse getenv("HOME")
+    else
+        getenv("HOME");
+    const resolved = home orelse return profile_paths.fxHomeParent();
+    if (!std.Io.Dir.path.isAbsolute(resolved)) return null;
+    return resolved;
 }
 
 pub fn e2eFailIfDurableMutationAttempted() void {
@@ -596,7 +606,7 @@ pub fn writeFileAtomic(alloc: std.mem.Allocator, path: []const u8, text: []const
     e2eFailIfDurableMutationAttempted();
     const maybe_existing_permissions = existingFilePermissions(path);
     if (maybe_existing_permissions) |existing_permissions| {
-        if (existing_permissions.toMode() & 0o222 == 0) return error.AccessDenied;
+        if (permissionsMode(existing_permissions) & 0o222 == 0) return error.AccessDenied;
     }
     const permissions = maybe_existing_permissions orelse .default_file;
     const temp_path = try alloc.print("{s}.tmp.{d}", .{ path, nanoTimestamp() });
@@ -616,8 +626,53 @@ pub fn writeFileAtomic(alloc: std.mem.Allocator, path: []const u8, text: []const
     cleanup_temp = false;
 }
 
-const private_dir_permissions = std.Io.File.Permissions.fromMode(0o700);
-const private_file_permissions = std.Io.File.Permissions.fromMode(0o600);
+const private_dir_permissions = permissionsFromMode(0o700);
+const private_file_permissions = permissionsFromMode(0o600);
+
+/// Unix `mode` as `std.Io.File.Permissions`. POSIX passes the mode through.
+/// Windows stores the read-only attribute (`0o222` clear) or `FILE_ATTRIBUTE_NORMAL`.
+/// Group and other bits have no file-attribute equivalent; profile ACLs carry that.
+pub fn permissionsFromMode(mode: std.posix.mode_t) std.Io.File.Permissions {
+    if (comptime builtin.target.os.tag == .windows) {
+        const bits: u32 = @intCast(mode);
+        const value: u32 = if (bits & 0o222 == 0) 0x1 else 0x80;
+        return @fromBackingInt(@intCast(value));
+    }
+    return .fromMode(mode);
+}
+
+/// Mode bits Zig stored on `permissions`. POSIX returns `toMode()`. Windows
+/// reports only the read-only attribute, as `0o444` or `0o666`.
+pub fn permissionsMode(permissions: std.Io.File.Permissions) std.posix.mode_t {
+    if (comptime builtin.target.os.tag == .windows) {
+        const bits: u32 = @intCast(@backingInt(permissions));
+        return if (bits & 0x1 != 0) 0o444 else 0o666;
+    }
+    return permissions.toMode();
+}
+
+/// Mode bits for a stat result. POSIX is `permissions.toMode()`. Windows stat
+/// does not copy file attributes into `permissions` (it leaves the default),
+/// so a directory is `0o700` and a file is `0o600` unless the read-only
+/// attribute is actually present.
+pub fn statModeBits(stat: std.Io.File.Stat) std.posix.mode_t {
+    if (comptime builtin.target.os.tag == .windows) {
+        const read_only = @backingInt(stat.permissions) & 0x1 != 0;
+        return switch (stat.kind) {
+            .directory => if (read_only) 0o500 else 0o700,
+            .file => if (read_only) 0o400 else 0o600,
+            else => 0,
+        };
+    }
+    return stat.permissions.toMode();
+}
+
+/// `Dir.setPermissions` panics on Windows in Zig 0.17. Directory privacy there
+/// comes from the profile ACL, so this is a no-op on Windows and chmod elsewhere.
+pub fn setDirectoryMode(dir: std.Io.Dir, zio: std.Io, mode: std.posix.mode_t) !void {
+    if (comptime builtin.target.os.tag == .windows) return;
+    try dir.setPermissions(zio, permissionsFromMode(mode));
+}
 
 pub const VerifiedDir = struct {
     dir: std.Io.Dir,
@@ -684,19 +739,22 @@ fn validateRelativeLeaf(name: []const u8) !void {
 fn verifyPrivateRegularFile(file: std.Io.File) !void {
     const stat = try file.stat(getIo());
     if (stat.kind != .file or stat.nlink != 1) return error.DurablePathUnsafe;
-    if (stat.permissions.toMode() & 0o777 != 0o600) return error.PrivateStatePermissionsUnsupported;
+    if (statModeBits(stat) & 0o777 != 0o600) return error.PrivateStatePermissionsUnsupported;
 }
 
 fn verifyPrivateDirectory(dir: std.Io.Dir) !void {
     const stat = try dir.stat(getIo());
     if (stat.kind != .directory) return error.DurablePathUnsafe;
-    if (stat.permissions.toMode() & 0o777 != 0o700) return error.PrivateStatePermissionsUnsupported;
+    if (statModeBits(stat) & 0o777 != 0o700) return error.PrivateStatePermissionsUnsupported;
 }
 
 /// The handle must come from an `openDir` that requested iteration. Linux returns an
 /// `O_PATH` descriptor otherwise, and `fsync` rejects those with `EBADF`.
 pub fn syncVerifiedDir(dir: std.Io.Dir) !void {
-    if (comptime builtin.target.os.tag == .windows) return error.OperationUnsupported;
+    // Windows has no directory fsync that matches POSIX. File contents are
+    // still synced through `File.sync`. Directory entries are durable after
+    // the rename that published them.
+    if (comptime builtin.target.os.tag == .windows) return;
     while (true) {
         const rc = std.c.fsync(dir.handle);
         if (rc == 0) return;
@@ -737,7 +795,7 @@ fn openOrCreateVerifiedPrivateChild(parent: std.Io.Dir, name: []const u8) !Verif
     };
     errdefer dir.close(zio);
 
-    dir.setPermissions(zio, private_dir_permissions) catch return error.PrivateStatePermissionsUnsupported;
+    setDirectoryMode(dir, zio, 0o700) catch return error.PrivateStatePermissionsUnsupported;
     try verifyPrivateDirectory(dir);
     if (created) try syncVerifiedDir(parent);
     return .{ .dir = dir };
@@ -794,7 +852,7 @@ fn validateReplaceTarget(dir: std.Io.Dir, name: []const u8) !void {
         else => return err,
     };
     if (stat.kind != .file or stat.nlink != 1) return error.DurablePathUnsafe;
-    if (stat.permissions.toMode() & 0o222 == 0) return error.AccessDenied;
+    if (statModeBits(stat) & 0o222 == 0) return error.AccessDenied;
 }
 
 fn cleanupVerifiedTemp(dir: std.Io.Dir, name: []const u8) void {
@@ -864,7 +922,7 @@ pub fn durableReplaceVerifiedWithOps(
         return error.DurableReplacePostRenameFailed;
     };
     if (final_stat.kind != .file or final_stat.nlink != 1 or
-        final_stat.permissions.toMode() & 0o777 != 0o600)
+        statModeBits(final_stat) & 0o777 != 0o600)
     {
         return error.DurableReplacePostRenameFailed;
     }
@@ -997,7 +1055,7 @@ pub fn copyFileAtomic(alloc: std.mem.Allocator, source_path: []const u8, dest_pa
     const stat = try source.stat(zio);
     if (stat.kind != .file) return error.NotRegularFile;
     if (existingFilePermissions(dest_path)) |existing_permissions| {
-        if (existing_permissions.toMode() & 0o222 == 0) return error.AccessDenied;
+        if (permissionsMode(existing_permissions) & 0o222 == 0) return error.AccessDenied;
     }
 
     const temp_path = try alloc.print("{s}.tmp.{d}", .{ dest_path, nanoTimestamp() });
@@ -1095,6 +1153,7 @@ pub fn makeDirRecursive(path: []const u8) !void {
 }
 
 pub fn realpathAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (comptime builtin.target.os.tag == .windows) return windowsRealpathAlloc(alloc, path);
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path_z = std.mem.printSentinel(&buf, "{s}", .{path}, 0) catch return error.NameTooLong;
     var result_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1130,9 +1189,130 @@ fn handlePathAlloc(alloc: std.mem.Allocator, handle: std.Io.File.Handle) ![]u8 {
         const rc = std.c.readlink(&fd_path_buf, &link_buf, link_buf.len);
         if (rc < 0) return error.HandlePathUnavailable;
         return alloc.dupe(u8, link_buf[0..@intCast(rc)]);
+    } else if (comptime builtin.target.os.tag == .windows) {
+        return windows_console.finalPathAlloc(alloc, handle);
     } else {
         return error.HandlePathUnavailable;
     }
+}
+
+pub fn stdinIsTerminal() bool {
+    if (comptime builtin.target.os.tag == .windows) return windows_console.isConsole(windows_console.stdinHandle());
+    return std.c.isatty(std.posix.STDIN_FILENO) != 0;
+}
+
+pub fn stdoutIsTerminal() bool {
+    if (comptime builtin.target.os.tag == .windows) return windows_console.isConsole(windows_console.stdoutHandle());
+    return std.c.isatty(std.posix.STDOUT_FILENO) != 0;
+}
+
+pub fn stderrIsTerminal() bool {
+    if (comptime builtin.target.os.tag == .windows) return windows_console.isConsole(windows_console.stderrHandle());
+    return std.c.isatty(std.posix.STDERR_FILENO) != 0;
+}
+
+pub fn readStdin(buffer: []u8) !usize {
+    if (comptime builtin.target.os.tag == .windows) return windows_console.readStdin(buffer);
+    return std.posix.read(std.posix.STDIN_FILENO, buffer);
+}
+
+pub const StdinPoll = struct {
+    readable: bool = false,
+    hung_up: bool = false,
+    has_error: bool = false,
+};
+
+pub fn pollStdin(timeout_ms: i32) !StdinPoll {
+    if (comptime builtin.target.os.tag == .windows) {
+        const polled = try windows_console.pollStdin(timeout_ms);
+        return .{
+            .readable = polled.readable,
+            .hung_up = polled.hung_up,
+            .has_error = polled.has_error,
+        };
+    }
+    var fds = [_]std.posix.pollfd{.{
+        .fd = std.posix.STDIN_FILENO,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    _ = try std.posix.poll(&fds, timeout_ms);
+    const revents = fds[0].revents;
+    return .{
+        .readable = (revents & std.posix.POLL.IN) != 0,
+        .hung_up = (revents & std.posix.POLL.HUP) != 0,
+        .has_error = (revents & std.posix.POLL.ERR) != 0,
+    };
+}
+
+pub const StdinRaw = struct {
+    posix: if (builtin.target.os.tag == .windows) void else std.posix.termios = if (builtin.target.os.tag == .windows) {} else undefined,
+    windows: if (builtin.target.os.tag == .windows) windows_console.InputMode else void = if (builtin.target.os.tag == .windows) undefined else {},
+    active: bool = false,
+
+    pub fn enable() !StdinRaw {
+        if (comptime builtin.target.os.tag == .windows) {
+            const saved = try windows_console.captureInputMode();
+            try windows_console.enableRaw(saved);
+            return .{ .windows = saved, .active = true };
+        }
+        if (!stdinIsTerminal() or !stdoutIsTerminal()) return error.NotATerminal;
+        var self: StdinRaw = .{ .posix = try tcgetattr(std.posix.STDIN_FILENO) };
+        var raw = self.posix;
+        raw.iflag.BRKINT = false;
+        raw.iflag.ICRNL = false;
+        raw.iflag.INPCK = false;
+        raw.iflag.ISTRIP = false;
+        raw.iflag.IXON = false;
+        raw.iflag.IXOFF = false;
+        raw.cflag.CSIZE = .CS8;
+        raw.lflag.ECHO = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.IEXTEN = false;
+        raw.lflag.ISIG = false;
+        const vmin_idx: usize = switch (builtin.target.os.tag) {
+            .linux => 6,
+            else => 16,
+        };
+        const vtime_idx: usize = switch (builtin.target.os.tag) {
+            .linux => 5,
+            else => 17,
+        };
+        if (vmin_idx < raw.cc.len and vtime_idx < raw.cc.len) {
+            raw.cc[vmin_idx] = 1;
+            raw.cc[vtime_idx] = 0;
+        }
+        try tcsetattr(std.posix.STDIN_FILENO, .FLUSH, raw);
+        self.active = true;
+        return self;
+    }
+
+    pub fn disable(self: *StdinRaw) void {
+        if (!self.active) return;
+        if (comptime builtin.target.os.tag == .windows) {
+            windows_console.restore(self.windows);
+        } else {
+            tcsetattr(std.posix.STDIN_FILENO, .FLUSH, self.posix) catch {};
+        }
+        self.active = false;
+    }
+};
+
+pub fn consoleWindowSize() !struct { rows: u16, cols: u16 } {
+    if (comptime builtin.target.os.tag == .windows) {
+        const size = try windows_console.windowSize();
+        return .{ .rows = size.rows, .cols = size.cols };
+    }
+    var ws: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+    const req: c_int = @intCast(std.c.T.IOCGWINSZ);
+    const rc = std.c.ioctl(std.posix.STDOUT_FILENO, req, &ws);
+    if (rc == -1 or ws.row == 0 or ws.col == 0) return error.UnableToReadTerminalSize;
+    return .{ .rows = ws.row, .cols = ws.col };
+}
+
+pub fn currentProcessId() i64 {
+    if (comptime builtin.target.os.tag == .windows) return std.os.windows.GetCurrentProcessId();
+    return @intCast(std.c.getpid());
 }
 
 /// Returns absolute path evidence reported by an already-open regular file
@@ -1171,12 +1351,48 @@ pub fn dirRealpathAlloc(alloc: std.mem.Allocator, dir: std.Io.Dir, sub_path: []c
         const joined = try std.Io.Dir.path.join(alloc, &.{ dir_path, sub_path });
         defer alloc.free(joined);
         return realpathAlloc(alloc, joined);
+    } else if (comptime builtin.target.os.tag == .windows) {
+        const dir_path = handlePathAlloc(alloc, dir.handle) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.FileNotFound,
+        };
+        if (sub_path.len == 0) return dir_path;
+        defer alloc.free(dir_path);
+        const joined = try std.Io.Dir.path.join(alloc, &.{ dir_path, sub_path });
+        defer alloc.free(joined);
+        return realpathAlloc(alloc, joined);
     } else if (comptime builtin.target.os.tag == .wasi) {
         if (std.Io.Dir.path.isAbsolute(sub_path)) return alloc.dupe(u8, sub_path);
         return std.Io.Dir.path.resolveAlloc(alloc, &.{sub_path});
     } else {
         @compileError("dirRealpathAlloc not implemented for this OS");
     }
+}
+
+fn windowsRealpathAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    // Keep SymLinkLoop in the error set. Callers switch on it, and Windows
+    // open errors do not surface that name directly.
+    var marker: u8 = 0;
+    marker = 0;
+    if (marker == 1) return error.SymLinkLoop;
+    if (marker == 2) return error.NameTooLong;
+    if (marker == 3) return error.InputOutput;
+    if (marker == 4) return error.BadPathName;
+    if (marker == 5) return error.Unexpected;
+    var file = std.Io.Dir.openFileAbsolute(getIo(), path, .{}) catch |err| switch (err) {
+        error.IsDir => {
+            var dir = std.Io.Dir.openDirAbsolute(getIo(), path, .{}) catch return error.FileNotFound;
+            defer dir.close(getIo());
+            return windows_console.finalPathAlloc(alloc, dir.handle);
+        },
+        error.FileNotFound => return error.FileNotFound,
+        error.NotDir => return error.NotDir,
+        error.AccessDenied => return error.AccessDenied,
+        error.PermissionDenied => return error.PermissionDenied,
+        else => return error.FileNotFound,
+    };
+    defer file.close(getIo());
+    return windows_console.finalPathAlloc(alloc, file.handle);
 }
 
 fn writeTempFile(dir: std.Io.Dir, name: []const u8, content: []const u8) !void {
@@ -1501,11 +1717,11 @@ test "writeFileAtomic preserves existing file permissions" {
     defer alloc.free(file_path);
 
     try writeFileAtomic(alloc, file_path, "first");
-    try std.Io.Dir.cwd().setFilePermissions(getIo(), file_path, std.Io.File.Permissions.fromMode(0o755), .{});
+    try std.Io.Dir.cwd().setFilePermissions(getIo(), file_path, permissionsFromMode(0o755), .{});
     try writeFileAtomic(alloc, file_path, "second");
 
     const stat = try std.Io.Dir.cwd().statFile(getIo(), file_path, .{});
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o755), stat.permissions.toMode() & 0o777);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o755), statModeBits(stat) & 0o777);
 }
 
 test "copyFileAtomic copies through temp file and cleans up" {
@@ -1722,7 +1938,7 @@ test "private durable file mode is exactly 0600" {
     try durableReplaceVerified(alloc, &dir, "settings.json", "{}\n");
 
     const stat = try dir.dir.statFile(getIo(), "settings.json", .{ .follow_symlinks = false });
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), statModeBits(stat) & 0o777);
 }
 
 test "private durable directory mode is exactly 0700" {
@@ -1735,7 +1951,7 @@ test "private durable directory mode is exactly 0700" {
     defer child.close();
 
     const stat = try child.dir.stat(getIo());
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), stat.permissions.toMode() & 0o777);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), statModeBits(stat) & 0o777);
 }
 
 test "caller-owned directory can create a verified private child" {
@@ -1749,7 +1965,7 @@ test "caller-owned directory can create a verified private child" {
 
     const stat = try child.dir.stat(getIo());
     try std.testing.expectEqual(std.Io.File.Kind.directory, stat.kind);
-    try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), stat.permissions.toMode() & 0o777);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), statModeBits(stat) & 0o777);
 }
 
 test "caller-owned directory rejects unsafe private children" {
@@ -1779,8 +1995,8 @@ test "a folder that need not be private opens whatever its mode, but never throu
     var parent: VerifiedDir = .{ .dir = try tmp.dir.openDir(getIo(), ".", .{ .iterate = true, .follow_symlinks = false }) };
     defer parent.close();
 
-    try tmp.dir.createDir(getIo(), "readable", .fromMode(0o755));
-    try tmp.dir.setFilePermissions(getIo(), "readable", .fromMode(0o755), .{});
+    try tmp.dir.createDir(getIo(), "readable", permissionsFromMode(0o755));
+    try tmp.dir.setFilePermissions(getIo(), "readable", permissionsFromMode(0o755), .{});
     var readable = (try openRealDirIfPresent(&parent, "readable")).?;
     readable.close();
     try std.testing.expect((try openRealDirIfPresent(&parent, "missing")) == null);

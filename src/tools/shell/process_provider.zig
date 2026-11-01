@@ -19,15 +19,15 @@ fn captureToken(
     alloc: Allocator,
     pid_text: []const u8,
 ) process_provider.ProviderError!process_identity.ProcessInstanceToken {
-    const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch
+    const pid_value = std.fmt.parseInt(u32, pid_text, 10) catch
         return error.InvalidPid;
     return switch (builtin.target.os.tag) {
-        .linux => captureLinuxToken(alloc, pid) catch |err| switch (err) {
+        .linux => captureLinuxToken(alloc, @intCast(pid_value)) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.ProcessNotFound => error.ProcessNotFound,
             else => error.ProcessIdentityUnavailable,
         },
-        .macos => captureMacOSToken(pid) catch |err| switch (err) {
+        .macos => captureMacOSToken(@intCast(pid_value)) catch |err| switch (err) {
             error.ProcessNotFound => error.ProcessNotFound,
             else => error.ProcessIdentityUnavailable,
         },
@@ -227,6 +227,7 @@ fn signalProcess(
         .missing, .mismatched => return error.ProcessIdentityMismatch,
         .unavailable => return error.ProcessIdentityIndeterminate,
     }
+    if (comptime builtin.target.os.tag == .windows) return error.Unsupported;
     if (!host.current().process_control) return error.Unsupported;
     const pid = std.fmt.parseInt(std.posix.pid_t, pid_text, 10) catch
         return error.InvalidPid;

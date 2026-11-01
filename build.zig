@@ -79,8 +79,10 @@ pub fn build(b: *std.Build) void {
             .stack_protector = false,
             // A sanitized build keeps its frame pointers and symbols, so race
             // reports show whole stacks and name the code.
-            .omit_frame_pointer = !sanitize_thread,
-            .unwind_tables = .none,
+            // Windows SEH directives in mingw's startup code need a frame.
+            // Omitting it makes Zig 0.17 fail to compile the mingw CRT.
+            .omit_frame_pointer = !sanitize_thread and target.result.os.tag != .windows,
+            .unwind_tables = if (target.result.os.tag == .windows) .async else .none,
             .error_tracing = false,
             .strip = optimize != .debug and !sanitize_thread,
             .sanitize_thread = sanitize_thread,

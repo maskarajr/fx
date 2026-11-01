@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 
@@ -37,7 +38,7 @@ pub const FxHomeError = error{ FxHomeNotAbsolute, FxHomeIsRoot, FxHomeIsHome };
 /// ignored, and an empty value leaves the default. `value` must outlive the
 /// process, as an environment string does.
 pub fn useFxHome(value: []const u8, home: ?[]const u8) FxHomeError!void {
-    const trimmed = std.mem.trimEnd(u8, value, "/");
+    const trimmed = std.mem.trimEnd(u8, value, if (comptime builtin.target.os.tag == .windows) "/\\" else "/");
     if (value.len == 0) return;
     if (!std.Io.Dir.path.isAbsolute(value)) return error.FxHomeNotAbsolute;
     if (trimmed.len == 0) return error.FxHomeIsRoot;

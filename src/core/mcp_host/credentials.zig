@@ -615,7 +615,7 @@ test "the credential file is private, and one this fx can't read is never writte
 
     try store.put(testing.allocator, .{ .name = "plain", .url = url }, "{\"access\":\"p1\"}");
     const stat = try tmp.dir.statFile(testing.io, test_path, .{});
-    try testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+    try testing.expectEqual(@as(std.posix.mode_t, 0o600), io_mod.statModeBits(stat) & 0o777);
     const found = (try store.lookup(testing.allocator, .{ .name = "plain", .url = url })).?;
     defer testing.allocator.free(found);
     try testing.expectEqualStrings("{\"access\":\"p1\"}", found);
