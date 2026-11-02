@@ -40,7 +40,7 @@ type StdioProvenance = {
 
 const allowlist: AllowRule[] = [
   rule("src/ui/transcript/io.zig", "writeFrameBytes", /stdio_write/, "frame_commit", "normal interactive frame delivery"),
-  rule("src/ui/transcript/runtime.zig", "<top-level>", /stdio_acquisition/, "interactive_terminal_owner", "stored interactive stdout handle"),
+  rule("src/ui/transcript/runtime.zig", "<top-level>", /stdio_acquisition|fixed_descriptor/, "interactive_terminal_owner", "stored interactive stdout handle"),
   rule("src/core/app/app_lifecycle.zig", "writeLifecycleTerminalBytes", /stdio_write/, "initialization_teardown", "interactive startup and teardown control"),
   rule("src/core/app/app_lifecycle.zig", "bootstrapInteractiveApp", /stdio_acquisition_write/, "initialization_teardown", "pre-raw-mode Keychain onboarding prompt"),
   rule("src/ui/shell_runtime.zig", "clearTmuxScreenAndHistory", /stdio_(?:acquisition|write)/, "terminal_reset", "tmux pane reset before history cleanup"),
@@ -51,6 +51,7 @@ const allowlist: AllowRule[] = [
   rule("src/ui/shell_runtime.zig", "(?:query|requestResize)CursorPosition", /stdio_(?:acquisition|write)/, "terminal_probe", "cursor-position query"),
   rule("src/ui/shell_runtime.zig", "(?:requestThemeColorScheme|requestThemeResponseFence|requestThemeBackground)", /stdio_(?:acquisition|write)/, "terminal_probe", "terminal theme query"),
   rule("src/ui/terminal/theme_detection.zig", "queryTerminalBackground", /stdio_(?:acquisition|write)/, "terminal_probe", "terminal background query"),
+  rule("src/ui/ask_presentation.zig", "standardOutputFd", /fixed_descriptor/, "terminal_probe", "ask stdout geometry probe"),
   rule("src/ui/ask_presentation.zig", "init", /fixed_descriptor/, "terminal_probe", "ask stdout geometry probe"),
   rule("src/ui/ask_presentation.zig", "init", /stdio_acquisition/, "interactive_terminal_owner", "stored ask presenter stdout handle"),
   rule("src/ui/ask_presentation.zig", "refreshGeometry", /fixed_descriptor/, "terminal_probe", "ask stdout geometry refresh"),
@@ -78,6 +79,7 @@ const allowlist: AllowRule[] = [
   rule("tests/json-schema/corpus_runner.zig", "printLine", /stdio_acquisition/, "noninteractive_output", "JSON Schema corpus report output"),
   rule("src/main.zig", "(?:writeStdoutFast|writeStderrFast)", /(?:stdio_acquisition_write|fixed_fd_write|raw_fd_write)/, "noninteractive_output", "top-level help and CLI validation output"),
   rule("src/main.zig", "(?:stdoutIsTerminal|stdoutTerminalColumns)", /fixed_descriptor/, "terminal_probe", "top-level help terminal capability probe"),
+  rule("src/core/shared/io.zig", "(?:stdoutIsTerminal|stderrIsTerminal|consoleWindowSize)", /fixed_descriptor/, "terminal_probe", "shared TTY and window-size probes"),
   rule("src/main.zig", "runExternalInteractive", /stdio_acquisition_write/, "initialization_teardown", "external CLI handoff spacing"),
   rule("benchmarks/activity_progress.zig", "main", /stdio_acquisition/, "benchmark_output", "benchmark report output"),
   rule("src/core/shell_command/command_effect.zig", "(?:expectDirect|expectNativePrintfEquivalent)", /debug_print/, "tests", "test diagnostics"),
