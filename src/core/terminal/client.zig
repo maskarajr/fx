@@ -602,7 +602,7 @@ pub const Runtime = struct {
         const home = self.profile_home orelse io_mod.homeDir() orelse
             return error.HomeNotSet;
 
-        const pid = std.c.getpid();
+        const pid: u32 = @intCast(io_mod.currentProcessId());
         var pid_buffer: [32]u8 = undefined;
         const pid_text = try std.mem.print(&pid_buffer, "{d}", .{pid});
         const token = try self.process_provider.captureToken(alloc, pid_text);
@@ -612,7 +612,7 @@ pub const Runtime = struct {
 
         const backend = try alloc.create(Backend);
         errdefer alloc.destroy(backend);
-        backend.process_owner = try contracts.ProcessOwner.init(pid, token.view());
+        backend.process_owner = try contracts.ProcessOwner.init(@intCast(pid), token.view());
         const owner_identity = try terminal_store.formatOwnerIdentity(
             &backend.owner_identity_bytes,
             &instance,

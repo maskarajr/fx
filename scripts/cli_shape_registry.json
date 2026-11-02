@@ -344,6 +344,7 @@
     "PATH",
     "SHELL",
     "SSH_CONNECTION",
+    "TEMP",
     "TERM",
     "TERM_PROGRAM",
     "TMPDIR",

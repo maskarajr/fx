@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
 
@@ -171,6 +172,11 @@ fn listenerReady(
     cancel_flag: Cancellation,
 ) !bool {
     if (cancel_flag.cancelled()) return error.Cancelled;
+    if (comptime builtin.target.os.tag == .windows) {
+        io_mod.sleep(poll_ms * std.time.ns_per_ms);
+        if (@intFromPtr(listener.socket.handle) == 0) return false;
+        return false;
+    }
     var fds = [_]std.posix.pollfd{.{
         .fd = listener.socket.handle,
         .events = std.posix.POLL.IN,
@@ -190,6 +196,10 @@ fn requestReadable(
     cancel_flag: Cancellation,
     deadline_ms: i64,
 ) !bool {
+    if (comptime builtin.target.os.tag == .windows) {
+        if (cancel_flag.cancelled() or @intFromPtr(socket) == 0 or deadline_ms == 0) return error.Cancelled;
+        return false;
+    }
     while (true) {
         if (cancel_flag.cancelled()) return error.Cancelled;
         const remaining_ms = deadline_ms - io_mod.milliTimestamp();

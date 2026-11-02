@@ -845,6 +845,7 @@ fn readPayload(
     stderr_fd: std.posix.fd_t,
     end_marker: []const u8,
 ) !ReadStatus {
+    if (comptime builtin.target.os.tag == .windows) return .incomplete;
     const started_ms = io_mod.milliTimestamp();
     const deadline = started_ms + capture_timeout_ms;
     var chunk: [64 * 1024]u8 = undefined;

@@ -149,6 +149,12 @@ jobs:
       - name: Build
         run: zig build -Doptimize=ReleaseSafe -Dcpu=baseline
 
+      # Cross-compile only. The Linux binary in zig-out stays the one E2E runs.
+      # Linking uses the same ReleaseSafe flags as the Linux build, with frame
+      # pointers kept so mingw's SEH startup code compiles.
+      - name: Cross-compile Windows
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-windows-gnu -Dcpu=baseline -p "$RUNNER_TEMP/fx-windows"
+
       - name: Smoke test fresh binary
         run: scripts/smoke-binary.sh zig-out/bin/fx
 

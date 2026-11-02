@@ -41,7 +41,7 @@ else
 
 const Allocator = std.mem.Allocator;
 
-const GracefulExitSigintGuard = if (host_target.is_wasm) struct {
+const GracefulExitSigintGuard = if (host_target.is_wasm or builtin.target.os.tag == .windows) struct {
     fn install(_: bool) @This() {
         return .{};
     }

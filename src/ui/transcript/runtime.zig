@@ -3096,7 +3096,7 @@ test "historical command detail keeps artifact handles after command block attac
     try tmp.dir.createDir(
         io_mod.getIo(),
         "session",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     var session_dir = try tmp.dir.openDir(io_mod.getIo(), "session", .{
         .iterate = true,
@@ -4477,7 +4477,16 @@ test "render diagnostic commit skips unchanged same-row paints" {
 }
 
 pub const TranscriptRuntime = struct {
-    stdout_file: std.Io.File = std.Io.File.stdout(),
+    // `File.stdout()` reads the Windows process block, which is not a
+    // compile-time value. POSIX keeps file descriptor 1. `init` replaces the
+    // Windows placeholder with the real console handle.
+    stdout_file: std.Io.File = .{
+        .handle = if (@import("builtin").target.os.tag == .windows)
+            @ptrFromInt(@as(usize, @bitCast(@as(isize, -11))))
+        else
+            std.posix.STDOUT_FILENO,
+        .flags = .{ .nonblocking = false },
+    },
     test_frame_sink: if (@import("builtin").is_test) ?render_engine.terminal_diff.FrameSink else void = if (@import("builtin").is_test) null else {},
     sync_updates_enabled: bool = true,
     history_reset_uses_ris: bool = false,
@@ -4674,6 +4683,9 @@ pub const TranscriptRuntime = struct {
             entry.* = null;
         }
         result.compact_transcript_source_cache.next_replacement = 0;
+        if (comptime @import("builtin").target.os.tag == .windows) {
+            result.stdout_file = std.Io.File.stdout();
+        }
         return result;
     }
 
