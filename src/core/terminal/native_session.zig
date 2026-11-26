@@ -46,7 +46,7 @@ const marker_ack_timeout_ms: i64 = 15_000;
 const command_release_byte: u8 = 2;
 const control_nonce_len: usize = 32;
 const marker_frame_len: usize = control_nonce_len + 1;
-const private_file_permissions = std.Io.File.Permissions.fromMode(0o600);
+const private_file_permissions = io_mod.permissionsFromMode(0o600);
 const default_dimensions: contracts.Dimensions = .{
     .rows = 24,
     .columns = 80,
@@ -103,6 +103,7 @@ const LauncherWatchdog = struct {
     host_closed: std.atomic.Value(bool) = .init(false),
 
     fn run(self: *LauncherWatchdog) void {
+        if (comptime builtin.target.os.tag == .windows) return;
         var poll_fds = [_]std.posix.pollfd{.{
             .fd = std.posix.STDIN_FILENO,
             .events = std.posix.POLL.IN,
@@ -158,6 +159,7 @@ const LauncherControl = struct {
     }
 
     fn runInner(self: *LauncherControl) !void {
+        if (comptime builtin.target.os.tag == .windows) return;
         var poll_fds = [_]std.posix.pollfd{.{
             .fd = self.server.socket.handle,
             .events = std.posix.POLL.IN,

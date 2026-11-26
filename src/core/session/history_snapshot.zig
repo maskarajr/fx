@@ -412,7 +412,7 @@ fn openCacheFile(dir: *io_mod.VerifiedDir, mode: std.Io.Dir.OpenFileOptions.Mode
     errdefer file.close(io_mod.getIo());
     const stat = try file.stat(io_mod.getIo());
     if (stat.kind != .file or stat.nlink != 1) return error.HistoryCacheUnsafe;
-    if (mode == .read_write and stat.permissions.toMode() & 0o777 != 0o600)
+    if (mode == .read_write and io_mod.statModeBits(stat) & 0o777 != 0o600)
         return error.HistoryCachePermissionsUnsupported;
     return file;
 }

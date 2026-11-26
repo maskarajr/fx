@@ -631,6 +631,7 @@ fn abandonMcpStore(
         .watch => {},
     };
     if (reaped) return;
+    if (comptime builtin.target.os.tag == .windows) return;
     std.posix.kill(pid, .KILL) catch |err| {
         debug_trace.logf("keychain", "store abandon kill failed err={s}", .{@errorName(err)});
     };

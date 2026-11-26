@@ -1398,7 +1398,7 @@ fn traceFilePermissions() std.Io.File.Permissions {
     const builtin = @import("builtin");
     return switch (builtin.target.os.tag) {
         .windows => .default_file,
-        else => std.Io.File.Permissions.fromMode(0o600),
+        else => io_mod.permissionsFromMode(0o600),
     };
 }
 
@@ -1663,12 +1663,13 @@ fn writeCurrentStateSummary(writer: *std.Io.Writer, app: anytype, alloc: std.mem
 }
 
 fn writeProcessSummary(writer: *std.Io.Writer, alloc: std.mem.Allocator) !void {
-    const pid = std.c.getpid();
+    const pid = io_mod.currentProcessId();
     try writer.print("process: pid={d}", .{pid});
     if (countOpenFileDescriptors()) |fd_count| try writer.print(" open_fds={d}", .{fd_count});
     try writer.writeByte('\n');
 
-    const ps = processMemorySnapshot(alloc, pid) catch null;
+    if (comptime @import("builtin").target.os.tag == .windows) return;
+    const ps = processMemorySnapshot(alloc, std.c.getpid()) catch null;
     if (ps) |text| {
         defer alloc.free(text);
         const trimmed = std.mem.trim(u8, text, " \t\r\n");
@@ -3830,7 +3831,7 @@ test "trace report file uses private randomized markdown path" {
     const stat = try file.stat(std.testing.io);
     try std.testing.expectEqual(@as(u64, 6), stat.size);
     if (@import("builtin").target.os.tag != .windows) {
-        try std.testing.expectEqual(@as(std.posix.mode_t, 0), stat.permissions.toMode() & 0o077);
+        try std.testing.expectEqual(@as(std.posix.mode_t, 0), io_mod.statModeBits(stat) & 0o077);
     }
 }
 

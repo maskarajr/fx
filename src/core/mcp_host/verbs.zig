@@ -1016,6 +1016,22 @@ fn waitForLogin(c: Context, arena: Allocator, host: *Host, waiter: *Waiter, open
 
 /// A complete line from stdin, waiting at most 100 ms for one.
 fn readPasted(arena: Allocator, line: *std.ArrayList(u8)) !?[]const u8 {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        const polled = io_mod.pollStdin(100) catch return null;
+        if (!polled.readable) return null;
+        var buffer: [1024]u8 = undefined;
+        const n = io_mod.readStdin(&buffer) catch return null;
+        if (n == 0) {
+            io_mod.sleep(100 * std.time.ns_per_ms);
+            return null;
+        }
+        try line.appendSlice(arena, buffer[0..n]);
+        const end = std.mem.findScalar(u8, line.items, '\n') orelse return null;
+        const pasted = std.mem.trim(u8, line.items[0..end], " \t\r");
+        const copy = try arena.dupe(u8, pasted);
+        line.replaceRangeAssumeCapacity(0, end + 1, &.{});
+        return if (copy.len == 0) null else copy;
+    }
     var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
     if (try std.posix.poll(&fds, 100) == 0) return null;
     var buffer: [1024]u8 = undefined;

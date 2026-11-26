@@ -707,6 +707,7 @@ fn now(io: Io) i64 {
 /// included, means it can't carry another.
 fn closedByServer(kept: *std.http.Client.Connection) bool {
     if (kept.reader().bufferedLen() > 0 or kept.stream_reader.interface.bufferedLen() > 0) return true;
+    if (comptime @import("builtin").target.os.tag == .windows) return false;
     var ready = [_]std.posix.pollfd{.{ .fd = kept.stream_reader.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
     return (std.posix.poll(&ready, 0) catch return true) > 0;
 }

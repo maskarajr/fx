@@ -369,6 +369,7 @@ fn foregroundRequestAtDeadline(
 }
 
 fn foregroundSessionOwnerAlive() bool {
+    if (comptime builtin.target.os.tag == .windows) return true;
     var poll_fds = [_]std.posix.pollfd{.{
         .fd = std.posix.STDIN_FILENO,
         .events = std.posix.POLL.IN,
@@ -1742,25 +1743,29 @@ fn waitForForegroundSessionReady(
 
         const remaining_ms = foreground_session_setup_timeout_ms - setup_elapsed_ms;
         const poll_timeout_ms: i32 = @intCast(@min(@as(i64, 50), remaining_ms));
-        var poll_fds = [_]std.posix.pollfd{.{
-            .fd = ready_read.handle,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        if (try std.posix.poll(&poll_fds, poll_timeout_ms) == 0) continue;
+        if (comptime builtin.target.os.tag == .windows) {
+            io_mod.sleep(@as(u64, @intCast(poll_timeout_ms)) * std.time.ns_per_ms);
+        } else {
+            var poll_fds = [_]std.posix.pollfd{.{
+                .fd = ready_read.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            if (try std.posix.poll(&poll_fds, poll_timeout_ms) == 0) continue;
 
-        const revents = poll_fds[0].revents;
-        if ((revents & std.posix.POLL.IN) != 0) {
-            var marker: [1]u8 = undefined;
-            const marker_len = try std.posix.read(ready_read.handle, &marker);
-            if (marker_len == 0) return error.ForegroundSessionSetupFailed;
-            if (marker[0] != foreground_session_ready_byte) {
-                return error.InvalidForegroundSessionReady;
+            const revents = poll_fds[0].revents;
+            if ((revents & std.posix.POLL.IN) != 0) {
+                var marker: [1]u8 = undefined;
+                const marker_len = try std.posix.read(ready_read.handle, &marker);
+                if (marker_len == 0) return error.ForegroundSessionSetupFailed;
+                if (marker[0] != foreground_session_ready_byte) {
+                    return error.InvalidForegroundSessionReady;
+                }
+                return;
             }
-            return;
-        }
-        if ((revents & (std.posix.POLL.HUP | std.posix.POLL.ERR | std.posix.POLL.NVAL)) != 0) {
-            return error.ForegroundSessionSetupFailed;
+            if ((revents & (std.posix.POLL.HUP | std.posix.POLL.ERR | std.posix.POLL.NVAL)) != 0) {
+                return error.ForegroundSessionSetupFailed;
+            }
         }
     }
 }
@@ -1774,6 +1779,12 @@ fn cleanupForegroundSessionChild(
         return;
     }
     const pid = child.id orelse return;
+    if (comptime builtin.target.os.tag == .windows) {
+        switch (phase) {
+            .pre_ready, .group_ready => signalProcess(pid, .TERM) catch {},
+        }
+        return;
+    }
     const target_pid = switch (phase) {
         .pre_ready => pid,
         .group_ready => -pid,
@@ -2015,13 +2026,16 @@ fn artifactPath(alloc: Allocator, dir: []const u8, stem: []const u8, suffix: []c
 }
 
 fn fallbackCommandArtifactDir(alloc: Allocator) ![]u8 {
-    const temp_root = io_mod.getenv("TMPDIR") orelse "/tmp";
+    const temp_root = io_mod.getenv("TMPDIR") orelse
+        io_mod.getenv("TEMP") orelse
+        if (comptime builtin.target.os.tag == .windows) "." else "/tmp";
     const pid_text = try alloc.print("{d}", .{currentProcessId()});
     defer alloc.free(pid_text);
     return std.Io.Dir.path.join(alloc, &.{ temp_root, command_artifact_fallback_dir_name, pid_text });
 }
 
 fn currentProcessId() u64 {
+    if (comptime builtin.target.os.tag == .windows) return std.os.windows.GetCurrentProcessId();
     return @intCast(std.c.getpid());
 }
 
@@ -2198,7 +2212,7 @@ test "zsh user profile reports natural SIGTERM after alias-safe startup" {
         try wrapper.writeStreamingAll(io_mod.getIo(), source);
         try wrapper.setPermissions(
             io_mod.getIo(),
-            std.Io.File.Permissions.fromMode(0o700),
+            io_mod.permissionsFromMode(0o700),
         );
     }
 
@@ -2271,7 +2285,7 @@ fn writeSnapshotTestShellFor(
     var wrapper = try tmp.dir.createFile(io_mod.getIo(), wrapper_path, .{ .truncate = true });
     defer wrapper.close(io_mod.getIo());
     try wrapper.writeStreamingAll(io_mod.getIo(), source);
-    try wrapper.setPermissions(io_mod.getIo(), std.Io.File.Permissions.fromMode(0o700));
+    try wrapper.setPermissions(io_mod.getIo(), io_mod.permissionsFromMode(0o700));
     return .{
         .home = home,
         .workspace = workspace,
@@ -3855,10 +3869,21 @@ fn signalProcess(pid: std.posix.pid_t, signal: std.posix.SIG) !void {
 }
 
 fn signalProcessGroup(pid: std.posix.pid_t, signal: std.posix.SIG) !void {
+    if (comptime builtin.target.os.tag == .windows) return signalProcess(pid, signal);
     return signalProcess(-pid, signal);
 }
 
 fn terminateRemainingProcessGroup(pid: std.posix.pid_t) void {
+    if (comptime builtin.target.os.tag == .windows) {
+        signalProcess(pid, .TERM) catch |err| {
+            debug_trace.logf(
+                "core",
+                "remaining captured process cleanup failed err={s}",
+                .{@errorName(err)},
+            );
+        };
+        return;
+    }
     signalProcessGroup(pid, std.posix.SIG.KILL) catch |err| {
         debug_trace.logf(
             "core",
@@ -4636,7 +4661,7 @@ test "managed command artifact confirms an indeterminate rename target" {
     try tmp.dir.createDir(
         io_mod.getIo(),
         "session",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     const workspace = try io_mod.dirRealpathAlloc(
         alloc,
@@ -4716,7 +4741,7 @@ test "managed command artifact rejects an unconfirmed rename target" {
     try tmp.dir.createDir(
         io_mod.getIo(),
         "session",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     const workspace = try io_mod.dirRealpathAlloc(
         alloc,
@@ -5079,7 +5104,7 @@ test "cancellation preserves the termination grace in an invoked script" {
         );
         try script.setPermissions(
             io_mod.getIo(),
-            std.Io.File.Permissions.fromMode(0o700),
+            io_mod.permissionsFromMode(0o700),
         );
     }
 
@@ -5155,7 +5180,7 @@ test "cancelled managed command confirms an indeterminate artifact target" {
     try tmp.dir.createDir(
         io_mod.getIo(),
         "session",
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     );
     const workspace = try io_mod.dirRealpathAlloc(
         alloc,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const credentials = @import("credentials.zig");
 const browser_callback = @import("browser_callback.zig");
 const grok_session = @import("grok_session.zig");
@@ -388,6 +389,26 @@ const StdinManualCodeReader = struct {
 
     fn poll(self: *StdinManualCodeReader) !?[]const u8 {
         if (self.closed) return null;
+        if (comptime builtin.target.os.tag == .windows) {
+            const polled = try io_mod.pollStdin(0);
+            if (!polled.readable and !polled.hung_up) return null;
+            var chunk: [512]u8 = undefined;
+            defer @memset(&chunk, 0);
+            const read_len = try io_mod.readStdin(&chunk);
+            if (read_len == 0) {
+                self.closed = true;
+                return if (self.len == 0) null else self.buffer[0..self.len];
+            }
+            const line_end = std.mem.findScalar(u8, chunk[0..read_len], '\n') orelse read_len;
+            if (line_end > self.buffer.len - self.len) return error.GrokAuthorizationCodeTooLong;
+            @memcpy(self.buffer[self.len..][0..line_end], chunk[0..line_end]);
+            self.len += line_end;
+            if (line_end < read_len) {
+                self.closed = true;
+                return self.buffer[0..self.len];
+            }
+            return null;
+        }
         var fds = [_]std.posix.pollfd{.{
             .fd = std.posix.STDIN_FILENO,
             .events = std.posix.POLL.IN,

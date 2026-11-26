@@ -3349,12 +3349,17 @@ fn useFxHomeFromEnv(raw_env: RawEnviron) !void {
 /// Whether `path` is a file, or a path through one, rather than a folder or
 /// nothing yet. Asking for `path/` makes the system resolve it as a folder.
 /// This runs before fx's I/O is set up, so it calls libc.
+fn isPathSeparator(byte: u8) bool {
+    if (comptime builtin.target.os.tag == .windows) return byte == '/' or byte == '\\';
+    return byte == '/';
+}
+
 fn namesNonFolderRaw(path: []const u8) bool {
     var buffer: [std.Io.Dir.max_path_bytes + 2]u8 = undefined;
-    const trimmed = std.mem.trimEnd(u8, path, "/");
+    const trimmed = std.mem.trimEnd(u8, path, if (comptime builtin.target.os.tag == .windows) "/\\" else "/");
     if (trimmed.len == 0 or trimmed.len + 2 > buffer.len) return false;
     @memcpy(buffer[0..trimmed.len], trimmed);
-    buffer[trimmed.len] = '/';
+    buffer[trimmed.len] = if (comptime builtin.target.os.tag == .windows) '\\' else '/';
     buffer[trimmed.len + 1] = 0;
     const rc = std.c.access(@ptrCast(&buffer), std.c.F_OK);
     return rc != 0 and std.posix.errno(rc) == .NOTDIR;
@@ -3391,7 +3396,7 @@ fn createFolderPathRaw(path: []const u8) void {
     if (path.len == 0 or path.len >= buffer.len) return;
     var end: usize = 1;
     while (end <= path.len) : (end += 1) {
-        if (end != path.len and path[end] != '/') continue;
+        if (end != path.len and !isPathSeparator(path[end])) continue;
         @memcpy(buffer[0..end], path[0..end]);
         buffer[end] = 0;
         _ = std.c.mkdir(@ptrCast(&buffer), 0o755);
@@ -3470,6 +3475,11 @@ fn rawArgs(c_argc: c_int, c_argv: [*][*:0]c_char) []const [*:0]const u8 {
 }
 
 fn argsFromRaw(raw_args: []const [*:0]const u8) std.process.Args {
+    if (comptime builtin.target.os.tag == .windows) {
+        // The CRT argv is ANSI or a lossy UTF-8 view. The process block is
+        // the UTF-16 command line, which `std.process.Args` parses on Windows.
+        return .{ .vector = std.os.windows.peb().ProcessParameters.CommandLine.slice() };
+    }
     return .{ .vector = raw_args };
 }
 
@@ -3487,6 +3497,11 @@ fn processIoOptions(process_args: std.process.Args, env_block: std.process.Envir
 }
 
 fn environBlockFromRaw(raw_env: RawEnviron) std.process.Environ.Block {
+    if (comptime builtin.target.os.tag == .windows) {
+        // The Windows environment block moves when a variable is set, so a
+        // saved pointer is not valid. The global block reads it on each use.
+        return .global;
+    }
     var count: usize = 0;
     while (raw_env[count] != null) : (count += 1) {}
     return .{ .slice = raw_env[0..count :null] };
@@ -3542,12 +3557,17 @@ fn topLevelHelpStyleForValues(is_terminal: bool, no_color: bool, dumb_terminal: 
 }
 
 fn stdoutIsTerminal() bool {
-    if (comptime builtin.target.os.tag == .windows or !builtin.link_libc) return false;
-    return std.c.isatty(std.posix.STDOUT_FILENO) != 0;
+    if (comptime !builtin.link_libc) return false;
+    return io_mod.stdoutIsTerminal();
 }
 
 fn stdoutTerminalColumns() ?usize {
-    if (comptime builtin.target.os.tag == .windows or !builtin.link_libc) return null;
+    if (comptime builtin.target.os.tag == .windows) {
+        const size = io_mod.consoleWindowSize() catch return null;
+        if (size.cols == 0) return null;
+        return size.cols;
+    }
+    if (comptime !builtin.link_libc) return null;
 
     var ws: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
     const req: c_int = @intCast(std.c.T.IOCGWINSZ);
@@ -4064,7 +4084,7 @@ fn handleSigWinchWeb() callconv(.c) void {
     resize_interlock.noteResizeSignal();
 }
 
-const handle_sigwinch: app_lifecycle.ResizeHandler = if (host_target.is_wasm)
+const handle_sigwinch: app_lifecycle.ResizeHandler = if (host_target.is_wasm or builtin.target.os.tag == .windows)
     handleSigWinchWeb
 else
     handleSigWinchNative;

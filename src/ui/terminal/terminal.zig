@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const io_mod = @import("../../core/shared/io.zig");
 const types = @import("../../core/shared/types.zig");
 
 pub const interactive_mode_enable_sequence = "\x1b[>4;2m\x1b[>1u\x1b[?2004h\x1b[?7l";
@@ -34,6 +36,10 @@ pub fn interactiveModeEnableSequence(tmux: ?[]const u8) []const u8 {
 }
 
 pub fn queryLayout(fd: std.posix.fd_t, footer_rows: u16) !types.Layout {
+    if (comptime builtin.target.os.tag == .windows) {
+        const size = try io_mod.consoleWindowSize();
+        return layoutFromSize(size.rows, size.cols, footer_rows);
+    }
     var ws: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
 
     const req: c_int = @intCast(std.c.T.IOCGWINSZ);

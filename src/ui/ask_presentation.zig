@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assistant_presentation = @import("../core/agent/assistant_presentation.zig");
 const diff_mod = @import("../core/output/diff.zig");
 const types = @import("../core/shared/types.zig");
@@ -15,6 +16,11 @@ const ui_terminal = @import("terminal/terminal.zig");
 const Allocator = std.mem.Allocator;
 const Metrics = types.Metrics;
 const TranscriptRuntime = transcript_runtime.TranscriptRuntime;
+
+fn standardOutputFd() std.posix.fd_t {
+    if (comptime builtin.target.os.tag == .windows) return @ptrFromInt(1);
+    return std.posix.STDOUT_FILENO;
+}
 
 const restore_terminal_sequence = "\x1b[0m\x1b]8;;\x1b\\\x1b[?25h\x1b[?7h\n";
 const prepare_terminal_sequence = "\x1b[0m\x1b]8;;\x1b\\\x1b[?7l";
@@ -33,7 +39,7 @@ pub const Runtime = struct {
         user: types.UserTurn,
         no_color: bool,
     ) !Runtime {
-        const layout = zeroFooterLayout(try ui_terminal.queryLayout(std.posix.STDOUT_FILENO, 0));
+        const layout = zeroFooterLayout(try ui_terminal.queryLayout(standardOutputFd(), 0));
         var terminal = shell_runtime.TerminalState{};
         const cursor = probeTerminal(&terminal, layout, no_color);
         return initConfigured(
@@ -195,7 +201,7 @@ pub const Runtime = struct {
     }
 
     fn refreshGeometry(self: *Runtime) !void {
-        const queried = ui_terminal.queryLayout(std.posix.STDOUT_FILENO, 0) catch return;
+        const queried = ui_terminal.queryLayout(standardOutputFd(), 0) catch return;
         const layout = zeroFooterLayout(queried);
         if (layout.rows == self.shell.layout.rows and layout.cols == self.shell.layout.cols) return;
         try shell_runtime.applyResizeWithLayout(&self.shell, &self.metrics, layout, true);
@@ -404,7 +410,7 @@ fn probeTerminal(
         const fallback_light = if (no_color) false else ui_render.explicitThemeOverride() orelse false;
         ui_render.initTheme(fallback_light, null);
     }
-    if (std.c.isatty(std.posix.STDIN_FILENO) == 0) return fallback;
+    if (!io_mod.stdinIsTerminal()) return fallback;
     terminal.captureOriginalTermios() catch return fallback;
     terminal.enableRawMode() catch return fallback;
     defer terminal.disableRawMode();

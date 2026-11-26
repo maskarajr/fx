@@ -19,6 +19,7 @@
 //! helper process stops what is left once the program is gone (`helper`).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("../core/stdio_conn.zig");
 const wire = @import("../protocol/wire.zig");
 const lines = @import("lines.zig");
@@ -82,6 +83,7 @@ const helper = struct {
 
     /// Starts it, once, before the first server.
     fn start(io: std.Io) void {
+        if (comptime builtin.target.os.tag == .windows) return;
         mutex.lockUncancelable(io);
         defer mutex.unlock(io);
         if (started) return;
@@ -104,6 +106,7 @@ const helper = struct {
     /// Tells it a group started (`sign` '+') or was reaped ('-'). One that
     /// can't be told is stopped, so it never acts on a list out of date.
     fn tell(io: std.Io, sign: u8, group: std.posix.pid_t) void {
+        if (comptime builtin.target.os.tag == .windows) return;
         mutex.lockUncancelable(io);
         defer mutex.unlock(io);
         const fd = stdin orelse return;
@@ -114,6 +117,24 @@ const helper = struct {
         stdin = null;
     }
 };
+
+extern "kernel32" fn TerminateProcess(
+    hProcess: std.os.windows.HANDLE,
+    uExitCode: std.os.windows.UINT,
+) callconv(.winapi) std.os.windows.BOOL;
+
+extern "kernel32" fn WaitForSingleObject(
+    hHandle: std.os.windows.HANDLE,
+    dwMilliseconds: std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.DWORD;
+
+fn terminateWindowsProcess(handle: std.os.windows.HANDLE) bool {
+    return @backingInt(TerminateProcess(handle, 1)) != 0;
+}
+
+fn windowsWait(handle: std.os.windows.HANDLE) void {
+    _ = WaitForSingleObject(handle, 0xffffffff);
+}
 
 pub const Options = struct {
     argv: []const []const u8,
@@ -317,9 +338,14 @@ pub const Process = struct {
         everyone.mutex.unlock(p.io);
         p.pid_lock.lockUncancelable(p.io);
         if (p.pid) |pid| {
-            // The whole group, as `signal` does.
-            std.posix.kill(-pid, .KILL) catch std.posix.kill(pid, .KILL) catch {};
-            _ = std.c.waitpid(pid, null, 0);
+            if (comptime builtin.target.os.tag == .windows) {
+                _ = terminateWindowsProcess(pid);
+                windowsWait(pid);
+            } else {
+                // The whole group, as `signal` does.
+                std.posix.kill(-pid, .KILL) catch std.posix.kill(pid, .KILL) catch {};
+                _ = std.c.waitpid(pid, null, 0);
+            }
             helper.tell(p.io, '-', pid);
             p.pid = null;
         }
@@ -488,18 +514,31 @@ pub const Process = struct {
         std.debug.assert(p.stdin == null);
         helper.start(p.io);
         const stdin = try p.gpa.create(Stdin);
-        const child = std.process.spawn(p.io, .{
-            .argv = p.options.argv,
-            .environ_map = p.options.environ_map,
-            .cwd = if (p.options.cwd) |dir| .{ .path = dir } else .inherit,
-            .stdin = .pipe,
-            .stdout = .pipe,
-            .stderr = .pipe,
-            // A new process group, led by the server.
-            .pgid = 0,
-        }) catch |err| {
-            p.gpa.destroy(stdin);
-            return err;
+        const child = child: {
+            const spawned = if (comptime builtin.target.os.tag == .windows)
+                std.process.spawn(p.io, .{
+                    .argv = p.options.argv,
+                    .environ_map = p.options.environ_map,
+                    .cwd = if (p.options.cwd) |dir| .{ .path = dir } else .inherit,
+                    .stdin = .pipe,
+                    .stdout = .pipe,
+                    .stderr = .pipe,
+                })
+            else
+                std.process.spawn(p.io, .{
+                    .argv = p.options.argv,
+                    .environ_map = p.options.environ_map,
+                    .cwd = if (p.options.cwd) |dir| .{ .path = dir } else .inherit,
+                    .stdin = .pipe,
+                    .stdout = .pipe,
+                    .stderr = .pipe,
+                    // A new process group, led by the server.
+                    .pgid = 0,
+                });
+            break :child spawned catch |err| {
+                p.gpa.destroy(stdin);
+                return err;
+            };
         };
         const pid = child.id.?;
         p.pid_lock.lockUncancelable(p.io);
@@ -535,7 +574,11 @@ pub const Process = struct {
         p.signal(.kill);
         p.pid_lock.lockUncancelable(p.io);
         if (p.pid) |pid| {
-            _ = std.c.waitpid(pid, null, 0);
+            if (comptime builtin.target.os.tag == .windows) {
+                _ = windowsWait(pid);
+            } else {
+                _ = std.c.waitpid(pid, null, 0);
+            }
             helper.tell(p.io, '-', pid);
         }
         p.pid = null;
@@ -549,6 +592,11 @@ pub const Process = struct {
         p.pid_lock.lockUncancelable(p.io);
         defer p.pid_lock.unlock(p.io);
         const pid = p.pid orelse return;
+        if (comptime builtin.target.os.tag == .windows) {
+            // `pid` is the process handle. Exit 1 matches a killed process.
+            if (!terminateWindowsProcess(pid)) return;
+            return;
+        }
         const sig: std.posix.SIG = switch (which) {
             .term => .TERM,
             .kill => .KILL,
@@ -684,6 +732,15 @@ pub const Process = struct {
     }
 
     fn watch(p: *Process, generation: core.Generation, pid: std.posix.pid_t) std.Io.Cancelable!void {
+        if (comptime builtin.target.os.tag == .windows) {
+            windowsWait(pid);
+            p.pid_lock.lockUncancelable(p.io);
+            helper.tell(p.io, '-', pid);
+            p.pid = null;
+            p.pid_lock.unlock(p.io);
+            try p.awaitStderr(generation);
+            return;
+        }
         while (true) {
             p.pid_lock.lockUncancelable(p.io);
             var status: c_int = 0;

@@ -14,8 +14,8 @@ const max_record_bytes: usize = 256 * 1024;
 const compaction_threshold_bytes: u64 = 1024 * 1024;
 const compaction_record_limit: usize = 1000;
 const compaction_byte_limit: usize = 1024 * 1024;
-const private_dir_permissions = std.Io.File.Permissions.fromMode(0o700);
-const private_file_permissions = std.Io.File.Permissions.fromMode(0o600);
+const private_dir_permissions = io_mod.permissionsFromMode(0o700);
+const private_file_permissions = io_mod.permissionsFromMode(0o600);
 
 pub const LoadedPromptHistoryEntry = struct {
     text: []u8,
@@ -232,13 +232,11 @@ pub const Store = struct {
             };
         }
 
-        self.durable_home.?.dir.setPermissions(
-            io_mod.getIo(),
-            private_dir_permissions,
-        ) catch return error.PrivateStatePermissionsUnsupported;
+        io_mod.setDirectoryMode(self.durable_home.?.dir, io_mod.getIo(), 0o700) catch
+            return error.PrivateStatePermissionsUnsupported;
         const stat = try self.durable_home.?.dir.stat(io_mod.getIo());
         if (stat.kind != .directory) return error.DurablePathUnsafe;
-        if (stat.permissions.toMode() & 0o777 != 0o700) {
+        if (io_mod.statModeBits(stat) & 0o777 != 0o700) {
             return error.PrivateStatePermissionsUnsupported;
         }
     }
@@ -294,7 +292,7 @@ pub const Store = struct {
             };
         }
         const verified = if (writable) try file.stat(zio) else initial;
-        if (verified.permissions.toMode() & 0o777 != 0o600) {
+        if (io_mod.statModeBits(verified) & 0o777 != 0o600) {
             return error.PrivateStatePermissionsUnsupported;
         }
         if (created) {
@@ -903,7 +901,7 @@ fn ensureFixtureHome(home: []const u8) !void {
     std.Io.Dir.createDirAbsolute(
         std.testing.io,
         fx_dir,
-        std.Io.File.Permissions.fromMode(0o700),
+        io_mod.permissionsFromMode(0o700),
     ) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -916,7 +914,7 @@ fn writeFixture(home: []const u8, bytes: []const u8) !void {
     defer std.testing.allocator.free(path);
     var file = try std.Io.Dir.createFileAbsolute(std.testing.io, path, .{
         .truncate = true,
-        .permissions = std.Io.File.Permissions.fromMode(0o600),
+        .permissions = io_mod.permissionsFromMode(0o600),
     });
     defer file.close(std.testing.io);
     try file.writeStreamingAll(std.testing.io, bytes);
@@ -1432,17 +1430,17 @@ test "first append creates only private prompt history layout and reports layout
     const fx_stat = try fx_dir.stat(std.testing.io);
     try std.testing.expectEqual(
         @as(std.posix.mode_t, 0o700),
-        fx_stat.permissions.toMode() & 0o777,
+        io_mod.statModeBits(fx_stat) & 0o777,
     );
     const history_stat = try fx_dir.statFile(std.testing.io, "history.jsonl", .{});
     const lock_stat = try fx_dir.statFile(std.testing.io, "history.lock", .{});
     try std.testing.expectEqual(
         @as(std.posix.mode_t, 0o600),
-        history_stat.permissions.toMode() & 0o777,
+        io_mod.statModeBits(history_stat) & 0o777,
     );
     try std.testing.expectEqual(
         @as(std.posix.mode_t, 0o600),
-        lock_stat.permissions.toMode() & 0o777,
+        io_mod.statModeBits(lock_stat) & 0o777,
     );
 
     var failed_tmp = std.testing.tmpDir(.{});

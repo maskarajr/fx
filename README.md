@@ -39,7 +39,7 @@ fx is meant to be embedded and extended. Scripts call it with `fx ask`, editors 
 curl -fsSL https://fx.sh/setup.sh | bash
 ```
 
-fx runs on macOS and Linux, on x86_64 and arm64. The installer puts it in `~/.local/bin`. fx checks for updates in the background, and `fx upgrade` installs the latest release right away. [CHANGELOG.md](CHANGELOG.md) lists what changed in each release. You can also [try fx in your browser](https://fx.sh/try) without installing anything.
+fx runs on macOS and Linux, on x86_64 and arm64, and builds for Windows x86_64 from source with `zig build -Dtarget=x86_64-windows-gnu`. The installer puts the macOS and Linux binaries in `~/.local/bin`. On Windows, fx keeps its files under `%USERPROFILE%\.fx`, the interactive UI uses the console's virtual terminal mode, and shell commands run through `cmd.exe`. Login-shell snapshots, process-tree cleanup, and the macOS keychain stay on macOS and Linux. fx checks for updates in the background, and `fx upgrade` installs the latest release on macOS and Linux. [CHANGELOG.md](CHANGELOG.md) lists what changed in each release. You can also [try fx in your browser](https://fx.sh/try) without installing anything.
 
 ## Quick start
 

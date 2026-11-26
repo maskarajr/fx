@@ -21,6 +21,28 @@ pub const Fault = if (hooks) @import("storage_fault.zig").Fault else void;
 
 pub const folder_mode: std.posix.mode_t = 0o700;
 pub const file_mode: std.posix.mode_t = 0o600;
+
+/// Same mapping as `io.permissionsFromMode`. This module cannot import `io.zig`.
+pub fn permissionsFromMode(mode: std.posix.mode_t) Io.File.Permissions {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        const bits: u32 = @intCast(mode);
+        const value: u32 = if (bits & 0o222 == 0) 0x1 else 0x80;
+        return @fromBackingInt(@intCast(value));
+    }
+    return .fromMode(mode);
+}
+
+pub fn statModeBits(stat: Io.File.Stat) std.posix.mode_t {
+    if (comptime @import("builtin").target.os.tag == .windows) {
+        const read_only = @backingInt(stat.permissions) & 0x1 != 0;
+        return switch (stat.kind) {
+            .directory => if (read_only) 0o500 else 0o700,
+            .file => if (read_only) 0o400 else 0o600,
+            else => 0,
+        };
+    }
+    return stat.permissions.toMode();
+}
 /// A blob never changes once written, and a tool may open it by path (D49).
 pub const blob_mode: std.posix.mode_t = 0o400;
 
@@ -101,7 +123,7 @@ pub const Storage = struct {
         // Missing parents are the manager's own folders, so private too, for
         // example `~/.fx/sessions` on a machine that never ran v1 (D19).
         // Existing ones are left as they are.
-        _ = cwd.createDirPathStatus(s.io, parent_path, .fromMode(folder_mode)) catch |err| return translate(err);
+        _ = cwd.createDirPathStatus(s.io, parent_path, permissionsFromMode(folder_mode)) catch |err| return translate(err);
         var parent = cwd.openDir(s.io, parent_path, .{}) catch |err| return translate(err);
         defer parent.close(s.io);
         return s.ensureDir(.{ .handle = parent }, name);
@@ -151,7 +173,7 @@ pub const Storage = struct {
         try s.alive();
         try s.mutate();
         assertComponent(name);
-        parent.handle.createDir(s.io, name, .fromMode(folder_mode)) catch |err|
+        parent.handle.createDir(s.io, name, permissionsFromMode(folder_mode)) catch |err|
             return translate(err);
         if (hooks) if (s.fault) |f| try f.noteCreate(s, parent, name);
     }
@@ -176,7 +198,7 @@ pub const Storage = struct {
             .read = true,
             .truncate = false,
             .exclusive = true,
-            .permissions = .fromMode(mode),
+            .permissions = permissionsFromMode(mode),
             .resolve_beneath = true,
         }) catch |err| return translate(err);
         if (hooks) if (s.fault) |f| {
@@ -351,7 +373,7 @@ pub const Storage = struct {
                 .directory => .directory,
                 else => .other,
             },
-            .mode = st.permissions.toMode() & 0o777,
+            .mode = statModeBits(st) & 0o777,
             .mtime_ms = st.mtime.toMilliseconds(),
         };
     }
